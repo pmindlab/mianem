@@ -1,46 +1,80 @@
 # Current Task
 
-TASK_ID: mianem-v1-7-4-state-recovery-and-search-depth-2026-09-17
+TASK_ID: mianem-search-v2-multisource-depth-2026-09-17
 
-Status: implementation on feature branch; CI + Human Owner Windows QA pending.
+Status: implementation on stacked feature branch; CI and Human Owner result-quality QA pending.
+
+## Context / base
+This task is stacked on the v1.7.4 state-recovery branch from PR #21. The Human Owner explicitly asked to prioritize materially more effective naming search; the stale version label visible in the browser is deferred and is not the focus of this task.
 
 ## Trigger
-Human Owner reported two real-product problems in the Windows portable build:
+The current search can still produce very few or zero useful records because the source universe is narrow and short real-word `.com` space is highly saturated:
 
-1. previously saved shortlist / radar / reject records were no longer visible after moving from the source/development build to portable state under `%LOCALAPPDATA%\\PMindLab\\Mianem`;
-2. normal naming search could sometimes return very few or zero records, even though the product should continue searching rather than stop after one shallow discovery/domain-check pass.
+- taxonomy discovery originally searched primarily GENUS records,
+- bundled language lists are intentionally small,
+- availability checking can only work with names that discovery has already surfaced,
+- Human Owner's real Deep QA on 17.09.2026 with exact length 6 produced: **12,300 discovered → 490 selected → 490 checked → 0 available `.com`**.
 
-A competitor benchmark (Namelix, Atom, NameSnack, Looka) also confirmed the mature pattern: create a broad candidate pool, rank it, learn from saved preferences, and progressively check availability rather than treating one small batch as the complete search universe.
+That QA result is a hard product finding: deeper discovery of only attested words/taxa can increase volume without increasing registration yield.
 
-## v1.7.4 remediation
+A competitor benchmark (Atom, Namelix, NameSnack, Looka) reinforced the useful architecture pattern: build a broad multi-source candidate universe first, rank it, use saved preferences, then progressively check live availability. Mianem adopts that architecture without copying competitor UI/content.
 
-### Portable state recovery
-- Preserve portable mutable state under `%LOCALAPPDATA%\\PMindLab\\Mianem`.
-- Never bundle the Human Owner's local SQLite state.
-- If the current portable DB already has candidates, do not import or overwrite anything.
-- If exactly one obvious legacy `data\\namelab.db` is found next to the launch location, import it automatically.
-- Otherwise, when the new portable DB is empty, explicitly offer the user a file picker for the old `namelab.db` rather than silently presenting an empty history.
-- Validate that the selected SQLite DB contains the Mianem `candidates` table and at least one candidate.
-- Preserve an existing empty target as `namelab.before-import*.db` before replacement.
-- Copy through a temporary file and validate it before atomic replacement.
+## Search v2 scope
 
-### Adaptive search depth
-- Keep the existing real-word / taxonomy preference and existing scoring threshold.
-- If the initial scored pool is thin, repeat discovery against the same trusted sources with a larger source limit (up to a bounded maximum).
-- Do not lower `min_score` merely to fill the screen.
-- Check live `.com` availability progressively in additional ranked batches when the first batch produces too few available names.
-- Bound the additional domain work; no unbounded scanning.
-- Only `domain_status == available` may enter returned results.
-- Existing brand screening remains after live availability filtering.
+### 1. Multi-source discovery
+- Preserve existing curated genera, seeds and bundled language words.
+- Add accepted GBIF species epithets as a second real taxonomic source.
+- Sample species pages across the full GBIF result set rather than only the first alphabetic slice.
+- When English is explicitly selected, add an optional runtime semantic real-word source related to the selected naming areas.
+- Remote semantic failure is non-fatal; taxonomy and bundled data remain sufficient to run the app.
+- Deduplicate names before scoring.
+
+### 2. Mode-specific depth
+- Fast: existing shallow source budget; no extra species/semantic spend and no constructed-name fallback.
+- Detailed/Balanced: bounded species expansion plus a smaller semantic-English budget.
+- Deep: materially larger species and semantic source budgets distributed across all selected areas.
+- The UI sends the actual selected mode to the backend instead of expressing depth only through numeric limits.
+
+### 3. Ranking + availability
+- Keep the existing `min_score`; do not lower quality merely to populate the screen.
+- Keep the learned preference profile from shortlist/radar/reject decisions.
+- Keep the highest-ranked names first, then diversify domain-check order across source families and niches so one source cannot monopolize the finite live-check budget.
+- Primary live `.com` budgets: Fast up to 120, Balanced up to 320, Deep up to 640 candidates when necessary.
+- Deep target is up to 40 actually available results when the source pool and RDAP yield permit it.
+- Use smaller live-check chunks (max 80) so the search can pivot sooner and respect RDAP back-pressure.
+- Stop early if repeated RDAP batches are mostly unknown/rate-limited rather than hammering the service.
+
+### 4. Availability-aware near-root fallback
+Human QA of the first rooted fallback showed another hard product finding: forms such as `Aglaor`, `Lafrix`, `Aglum`, `Urosix`, `Boisox` and `Doriax` were too abstract and no longer felt meaningfully connected to the selected bird groups.
+
+Therefore Balanced/Deep fallback is now deliberately conservative:
+
+- attested real names remain the preferred first phase;
+- fallback source material is restricted to real **GBIF genus / curated seed** hits from the selected taxonomic areas;
+- species epithets and generic semantic-English words may enrich real-name discovery but may **not** seed a synthetic fallback form;
+- no two-root fusion;
+- no arbitrary startup endings such as `-ix` / `-ox`;
+- no truncation to a generic 3-letter stem;
+- a generated form must differ from the source genus by **at most one character edit**;
+- allowed transformations are only: one-character extension, final-character substitution, or final-character shortening;
+- normal pronunciation / vowel-ratio / consonant-cluster checks still apply;
+- normal Mianem quality + shortlist/radar preference scoring still applies;
+- `min_score` is never lowered;
+- provenance is explicit on the result (`<selected niche> · from <real genus>` and `brandable:near-root`);
+- if this stricter fallback produces fewer results, that is preferable to filling the screen with abstract pseudo-names.
 
 ## QA gates
 - `pytest -q` green.
-- Existing Windows portable tests green.
-- New portable-state tests prove non-empty target protection, backup of an empty target, and automatic import of one obvious legacy DB.
-- New search-depth tests prove v1.7.4 is the active service and that progressive checks never promote non-available domains.
-- PyInstaller single-file Windows build green.
-- Packaged `--smoke-test` and `--server-smoke-test` green.
-- Human Owner validates on Windows that old saved names can be recovered and that a search which previously returned too few names now continues deeper.
+- Frontend JavaScript syntax gate green.
+- Search v2 is the active service while `DeepNameLabService` remains its safety baseline.
+- Regression proves species epithet extraction uses real single-token epithets and deduplicates them.
+- Regression proves Deep mode spends extra taxonomy/semantic budget and Fast mode does not.
+- Regression proves near-root fallback is deterministic, genus-only, exact-length aware and max-one-edit from source.
+- Regression proves a zero-available real-source run may pivot to the near-root genus phase in Deep mode.
+- Regression proves UI sends `search_mode` to the backend and exposes fallback stats.
+- Regression proves returned search still filters strictly on `domain_status == available`.
+- Windows portable build and packaged smoke tests green before giving the Human Owner a replacement test ZIP.
+- Human Owner repeats the same exact-length-6 Deep query and evaluates availability yield plus whether every derived result still has an obvious relationship to its source genus.
 
 ## Product invariants
-No aftermarket, auction, broker, redemption, pending-delete or merely expiring domain may be presented as available. Recommendation quality remains independent from `.com` availability. Brand screening remains research triage, not legal trademark clearance.
+No aftermarket, auction, broker, redemption, pending-delete or merely expiring domain may be presented as available. Recommendation quality remains independent from `.com` availability. Brand screening remains research triage, not legal trademark clearance. Prefer real words / real taxa / attested lexical material first; derived forms must stay visibly anchored to a real selected-area genus.
