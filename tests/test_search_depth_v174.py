@@ -10,9 +10,9 @@ from app.service_v174 import DeepNameLabService
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_v174_is_active_service_baseline():
+def test_v174_remains_search_v2_safety_baseline():
     assert app.__version__ == "1.7.4"
-    assert service_module.NameLabService is DeepNameLabService
+    assert issubclass(service_module.NameLabService, DeepNameLabService)
 
 
 def test_v174_keeps_quality_threshold_and_progressively_checks_domains():
