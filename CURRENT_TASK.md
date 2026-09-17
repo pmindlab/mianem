@@ -1,37 +1,46 @@
 # Current Task
 
-TASK_ID: mianem-windows-portable-startup-remediation-2026-09-12
+TASK_ID: mianem-v1-7-4-state-recovery-and-search-depth-2026-09-17
 
-Status: root cause confirmed; corrected single-executable build pending final Windows CI and Human Owner retest.
+Status: implementation on feature branch; CI + Human Owner Windows QA pending.
 
 ## Trigger
-The first Windows portable build passed CI and a narrow packaged `--smoke-test`, but on a second Windows computer the real launch failed and the launcher showed only the generic message `Mianem nie może się uruchomić`. The original QA gate did not exercise Uvicorn startup inside the windowed frozen executable.
+Human Owner reported two real-product problems in the Windows portable build:
 
-## Confirmed root cause
-The strengthened packaged-server test reproduced the failure on `windows-latest` and exposed the traceback:
+1. previously saved shortlist / radar / reject records were no longer visible after moving from the source/development build to portable state under `%LOCALAPPDATA%\\PMindLab\\Mianem`;
+2. normal naming search could sometimes return very few or zero records, even though the product should continue searching rather than stop after one shallow discovery/domain-check pass.
 
-`ValueError: Unable to configure formatter 'default'`
+A competitor benchmark (Namelix, Atom, NameSnack, Looka) also confirmed the mature pattern: create a broad candidate pool, rank it, learn from saved preferences, and progressively check availability rather than treating one small batch as the complete search universe.
 
-caused by Uvicorn's default logging formatter calling `.isatty()` on a `None` console stream in a PyInstaller `console=False` executable.
+## v1.7.4 remediation
 
-This was a launcher/runtime logging bug, not missing Python on the user's computer and not a reason to require installation or administrator access.
+### Portable state recovery
+- Preserve portable mutable state under `%LOCALAPPDATA%\\PMindLab\\Mianem`.
+- Never bundle the Human Owner's local SQLite state.
+- If the current portable DB already has candidates, do not import or overwrite anything.
+- If exactly one obvious legacy `data\\namelab.db` is found next to the launch location, import it automatically.
+- Otherwise, when the new portable DB is empty, explicitly offer the user a file picker for the old `namelab.db` rather than silently presenting an empty history.
+- Validate that the selected SQLite DB contains the Mianem `candidates` table and at least one candidate.
+- Preserve an existing empty target as `namelab.before-import*.db` before replacement.
+- Copy through a temporary file and validate it before atomic replacement.
 
-## Remediation
-- Keep the simple PyInstaller single-executable portable package.
-- Create Uvicorn with `log_config=None` so a windowed executable does not attempt to configure console-dependent formatters.
-- Add a packaged `--server-smoke-test` that must start the local server and receive `ok=true`, `app=Mianem` from `/api/health` before the ZIP can be produced.
-- Keep the existing frozen data-loading smoke test.
-- Capture server-thread failures and write `%LOCALAPPDATA%\PMindLab\Mianem\startup-error.txt`.
-- Show the real exception in the GUI failure dialog instead of the old generic re-extraction message.
-- Preserve local-only binding to `127.0.0.1` and local mutable state under `%LOCALAPPDATA%\PMindLab\Mianem`.
+### Adaptive search depth
+- Keep the existing real-word / taxonomy preference and existing scoring threshold.
+- If the initial scored pool is thin, repeat discovery against the same trusted sources with a larger source limit (up to a bounded maximum).
+- Do not lower `min_score` merely to fill the screen.
+- Check live `.com` availability progressively in additional ranked batches when the first batch produces too few available names.
+- Bound the additional domain work; no unbounded scanning.
+- Only `domain_status == available` may enter returned results.
+- Existing brand screening remains after live availability filtering.
 
 ## QA gates
-- Existing repository CI remains green.
-- Single-file PyInstaller build succeeds on `windows-latest`.
-- `Mianem.exe --smoke-test` succeeds.
-- `Mianem.exe --server-smoke-test` starts the packaged local server and reaches `/api/health` successfully.
-- Final ZIP and SHA-256 are produced only after both packaged smoke tests pass.
-- Human Owner re-tests the new ZIP on the same second Windows computer that exposed the original failure.
+- `pytest -q` green.
+- Existing Windows portable tests green.
+- New portable-state tests prove non-empty target protection, backup of an empty target, and automatic import of one obvious legacy DB.
+- New search-depth tests prove v1.7.4 is the active service and that progressive checks never promote non-available domains.
+- PyInstaller single-file Windows build green.
+- Packaged `--smoke-test` and `--server-smoke-test` green.
+- Human Owner validates on Windows that old saved names can be recovered and that a search which previously returned too few names now continues deeper.
 
 ## Product invariants
-Packaging only. Naming, scoring, `.com` availability, brand-screening and Workshop-curation behavior must not change. No local DB, custom niches, `.env`, API keys or other secrets may be bundled.
+No aftermarket, auction, broker, redemption, pending-delete or merely expiring domain may be presented as available. Recommendation quality remains independent from `.com` availability. Brand screening remains research triage, not legal trademark clearance.

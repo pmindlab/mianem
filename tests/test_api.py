@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from app import __version__
 from app.main import app
 
 
@@ -9,7 +10,7 @@ def test_health():
     data = r.json()
     assert data['ok'] is True
     assert data['app'] == 'Mianem'
-    assert data['version'] == '1.7.0'
+    assert data['version'] == __version__
     assert data['workshop'] is True
     assert data['semantic_workshop'] is True
     assert data['construction_families'] is True

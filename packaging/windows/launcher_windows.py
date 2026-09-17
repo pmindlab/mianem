@@ -81,12 +81,16 @@ def app_url(port: int) -> str:
     return f"http://{HOST}:{port}"
 
 
-def existing_mianem_port() -> int | None:
+def existing_mianem_port(expected_version: str | None = None) -> int | None:
     for port in PORT_RANGE:
         try:
             with urllib.request.urlopen(f"{app_url(port)}/api/health", timeout=0.2) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            if payload.get("ok") is True and payload.get("app") == APP_NAME:
+            if (
+                payload.get("ok") is True
+                and payload.get("app") == APP_NAME
+                and (expected_version is None or payload.get("version") == expected_version)
+            ):
                 return port
         except Exception:
             continue
@@ -137,6 +141,7 @@ def smoke_test() -> int:
 def server_smoke_test() -> int:
     configure_runtime()
     port = choose_port()
+    from app import __version__
     from app.main import app
 
     server = make_server(app, port)
@@ -156,7 +161,11 @@ def server_smoke_test() -> int:
             try:
                 with urllib.request.urlopen(f"{app_url(port)}/api/health", timeout=0.4) as response:
                     payload = json.loads(response.read().decode("utf-8"))
-                if payload.get("ok") is True and payload.get("app") == APP_NAME:
+                if (
+                    payload.get("ok") is True
+                    and payload.get("app") == APP_NAME
+                    and payload.get("version") == __version__
+                ):
                     return 0
             except Exception:
                 if not server_thread.is_alive():
@@ -165,21 +174,75 @@ def server_smoke_test() -> int:
         if server_errors:
             exc, tb = server_errors[0]
             raise RuntimeError(f"Frozen server failed: {type(exc).__name__}: {exc}\n{tb}") from exc
-        raise RuntimeError("Portable server smoke test: lokalny serwer nie osiągnął /api/health.")
+        raise RuntimeError("Portable server smoke test: lokalny serwer nie osiągnął /api/health z właściwą wersją.")
     finally:
         server.should_exit = True
         server_thread.join(timeout=5)
 
 
+def recover_previous_state(paths: dict[str, Path]) -> tuple[Path | None, bool]:
+    from app.portable_state import auto_import_legacy_database, candidate_count, import_legacy_database
+
+    target_db = Path(os.environ["NAMELAB_DB"])
+    if candidate_count(target_db) > 0:
+        return None, False
+
+    imported_from = auto_import_legacy_database(paths["launch_dir"], target_db)
+    if imported_from:
+        return imported_from, True
+
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        wants_import = messagebox.askyesno(
+            APP_NAME,
+            "Nie znaleziono zapisanych nazw w nowej lokalizacji danych.\n\n"
+            "Jeśli używałeś wcześniejszej wersji Mianem, możesz teraz wskazać jej plik data\\namelab.db.\n\n"
+            "Zaimportować poprzednie dane?",
+            parent=root,
+        )
+        if not wants_import:
+            return None, False
+        source = filedialog.askopenfilename(
+            title="Wybierz poprzedni plik namelab.db",
+            filetypes=[("Baza Mianem", "namelab.db"), ("SQLite", "*.db"), ("Wszystkie pliki", "*.*")],
+            parent=root,
+        )
+        if not source:
+            return None, False
+        imported = import_legacy_database(source, target_db)
+        messagebox.showinfo(
+            APP_NAME,
+            f"Zaimportowano poprzednie zapisane nazwy.\n\nŹródło: {source}\nNowa baza: {imported}",
+            parent=root,
+        )
+        return Path(source), True
+    except Exception as exc:
+        messagebox.showerror(
+            APP_NAME,
+            f"Nie udało się zaimportować poprzednich danych.\n\n{type(exc).__name__}: {exc}\n\n"
+            "Żaden istniejący plik nie został nadpisany.",
+            parent=root,
+        )
+        return None, False
+    finally:
+        root.destroy()
+
+
 def run_gui() -> int:
     paths = configure_runtime()
-    existing = existing_mianem_port()
+    from app import __version__
+
+    existing = existing_mianem_port(__version__)
     if existing is not None:
         webbrowser.open(app_url(existing))
         return 0
 
+    imported_from, imported = recover_previous_state(paths)
     port = choose_port()
-    from app import __version__
     from app.main import app
     import tkinter as tk
     from tkinter import messagebox, ttk
@@ -197,14 +260,18 @@ def run_gui() -> int:
 
     root = tk.Tk()
     root.title(f"Mianem {__version__}")
-    root.geometry("440x220")
+    root.geometry("440x235")
     root.resizable(False, False)
     frame = ttk.Frame(root, padding=22)
     frame.pack(fill="both", expand=True)
     ttk.Label(frame, text="Mianem", font=("Segoe UI", 20, "bold")).pack(anchor="w")
-    status = tk.StringVar(value="Uruchamiam lokalną aplikację…")
+    initial_status = "Odzyskano poprzednie zapisane dane · uruchamiam…" if imported else "Uruchamiam lokalną aplikację…"
+    status = tk.StringVar(value=initial_status)
     ttk.Label(frame, textvariable=status).pack(anchor="w", pady=(9, 4))
-    ttk.Label(frame, text=f"Dane lokalne: {paths['state_dir']}\nInternet jest potrzebny do GBIF i live .com.", justify="left").pack(anchor="w", pady=(0, 16))
+    data_text = f"Dane lokalne: {paths['state_dir']}\nInternet jest potrzebny do GBIF i live .com."
+    if imported_from:
+        data_text += f"\nImport: {imported_from}"
+    ttk.Label(frame, text=data_text, justify="left").pack(anchor="w", pady=(0, 16))
     buttons = ttk.Frame(frame)
     buttons.pack(fill="x")
     open_button = ttk.Button(buttons, text="Otwórz Mianem", state="disabled")
