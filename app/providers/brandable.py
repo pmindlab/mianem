@@ -116,7 +116,7 @@ class ControlledBrandableProvider:
                 name=candidate,
                 niche=niche,
                 key=raw,
-                source="brandable:near-root",
+                source=f"brandable:near-root:{raw}",
                 meaning=f"near-root variant of real genus {raw} · {operation} · 1 edit",
             ))
 
