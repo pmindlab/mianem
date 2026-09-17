@@ -4,7 +4,13 @@ import asyncio
 from collections import Counter, defaultdict, deque
 
 from .models import Candidate
-from .providers import LanguageHit, SemanticHit, SemanticWordProvider
+from .providers import (
+    BrandableHit,
+    ControlledBrandableProvider,
+    LanguageHit,
+    SemanticHit,
+    SemanticWordProvider,
+)
 from .scoring import score_name, valid_candidate
 from .service_v174 import DeepNameLabService
 
@@ -14,12 +20,14 @@ class SearchV2Service(DeepNameLabService):
 
     Search v2 keeps Mianem's core invariants: real/attested words are preferred, quality
     thresholds are not lowered just to fill the screen, and only a live-available .com
-    may be returned as an available result.
+    may be returned as an available result. When the attested pool is saturated, balanced
+    and deep modes may pivot to deterministic brandable forms rooted in those real words.
     """
 
     def __init__(self):
         super().__init__()
         self.semantic = SemanticWordProvider(self.gbif.timeout, concurrency=4)
+        self.brandable = ControlledBrandableProvider()
 
     @staticmethod
     def _mode(value: str | None) -> str:
@@ -53,6 +61,10 @@ class SearchV2Service(DeepNameLabService):
             elif source.startswith("semantic:"):
                 meaning = str(getattr(hit, "meaning", "") or "").strip()
                 reasons.insert(0, f"real semantic word · {meaning}" if meaning else "real semantic word")
+            elif source.startswith("brandable:"):
+                meaning = str(getattr(hit, "meaning", "") or "").strip()
+                reasons.insert(0, meaning or "constructed from attested naming roots")
+                reasons.insert(1, "controlled brandable fallback after real-word .com saturation")
             elif isinstance(hit, LanguageHit):
                 detail = f"real word · {hit.niche}"
                 if hit.meaning:
@@ -193,6 +205,50 @@ class SearchV2Service(DeepNameLabService):
                     buckets.pop(key, None)
         return ordered
 
+    async def _check_live(
+        self,
+        ordered: list[Candidate],
+        *,
+        max_checks: int,
+        target_available: int,
+        requested_batch_size: int,
+    ) -> tuple[list[Candidate], list[Candidate], list[str]]:
+        """Progressively check live .com while respecting RDAP back-pressure."""
+        checked: list[Candidate] = []
+        available: list[Candidate] = []
+        warnings: list[str] = []
+        cursor = 0
+        rate_limited_batches = 0
+        # Deep mode used to send a full 160-domain burst. Smaller chunks let Mianem
+        # pivot sooner and reduce the chance of wasting the whole run on RDAP pressure.
+        batch_size = min(80, max(1, requested_batch_size))
+        max_checks = min(len(ordered), max(0, max_checks))
+
+        while cursor < max_checks and (cursor == 0 or len(available) < target_available):
+            batch = ordered[cursor:min(cursor + batch_size, max_checks)]
+            if not batch:
+                break
+            domain_results = await self.domain.check_many([c.domain for c in batch])
+            unknown = 0
+            for candidate in batch:
+                result = domain_results.get(candidate.domain.lower())
+                candidate.domain_status = result.status if result else "unknown"
+                if candidate.domain_status == "unknown":
+                    unknown += 1
+            checked.extend(batch)
+            available.extend(c for c in batch if c.domain_status == "available")
+            cursor += len(batch)
+
+            if unknown > len(batch) / 2:
+                rate_limited_batches += 1
+                if rate_limited_batches >= 2:
+                    warnings.append("Live .com returned too many unknown results; checking stopped to avoid hammering RDAP.")
+                    break
+            else:
+                rate_limited_batches = 0
+
+        return checked, available, warnings
+
     async def run_search(
         self,
         selected_keys: list[str],
@@ -222,45 +278,72 @@ class SearchV2Service(DeepNameLabService):
         )
         check_order = self._check_order(scored)
 
-        batch_size = max(1, domain_checks)
         if mode == "fast":
-            cap = 120
+            primary_cap = 120
             target_available = 12
+            brandable_limit = 0
+            brandable_check_cap = 0
         elif mode == "balanced":
-            cap = 320
+            primary_cap = 320
             target_available = 24
+            brandable_limit = 1400
+            brandable_check_cap = 200
         else:
-            cap = 640
+            primary_cap = 640
             target_available = 40
-        max_checks = min(len(check_order), max(batch_size, cap))
+            brandable_limit = 3600
+            brandable_check_cap = 560
 
-        checked: list[Candidate] = []
-        available: list[Candidate] = []
-        cursor = 0
-        rate_limited_batches = 0
-        while cursor < max_checks and (cursor == 0 or len(available) < target_available):
-            batch = check_order[cursor:min(cursor + batch_size, max_checks)]
-            if not batch:
-                break
-            domain_results = await self.domain.check_many([c.domain for c in batch])
-            unknown = 0
-            for candidate in batch:
-                result = domain_results.get(candidate.domain.lower())
-                candidate.domain_status = result.status if result else "unknown"
-                if candidate.domain_status == "unknown":
-                    unknown += 1
-            checked.extend(batch)
-            available.extend(c for c in batch if c.domain_status == "available")
-            cursor += len(batch)
+        primary_max_checks = min(len(check_order), max(max(1, domain_checks), primary_cap))
+        primary_checked, available, live_warnings = await self._check_live(
+            check_order,
+            max_checks=primary_max_checks,
+            target_available=target_available,
+            requested_batch_size=domain_checks,
+        )
+        warnings.extend(live_warnings)
 
-            if unknown > len(batch) / 2:
-                rate_limited_batches += 1
-                if rate_limited_batches >= 2:
-                    warnings.append("Live .com returned too many unknown results; deep checking stopped to avoid hammering RDAP.")
-                    break
-            else:
-                rate_limited_batches = 0
+        real_available = len(available)
+        brandable_pool = 0
+        brandable_scored_count = 0
+        brandable_checked: list[Candidate] = []
+        brandable_available: list[Candidate] = []
+        constructed_known_skipped = 0
 
+        # Availability-aware pivot: if real/attested sources are saturated, do not just
+        # scan more of the same universe. Build deterministic forms from those attested
+        # roots, score them with the same quality + shortlist preference model, and only
+        # then spend additional live .com checks. Fast mode intentionally does not pivot.
+        if mode != "fast" and len(available) < target_available and brandable_limit > 0:
+            constructed_hits: list[BrandableHit] = self.brandable.expand(
+                discovered,
+                min_len=min_len,
+                max_len=max_len,
+                limit=brandable_limit,
+            )
+            brandable_pool = len(constructed_hits)
+            constructed_scored, constructed_known_skipped = await self._score_discovered(
+                constructed_hits,
+                min_len=min_len,
+                max_len=max_len,
+                min_score=min_score,
+                known_names=known_names,
+            )
+            already_considered = {c.name.lower() for c in scored}
+            constructed_scored = [c for c in constructed_scored if c.name.lower() not in already_considered]
+            brandable_scored_count = len(constructed_scored)
+            constructed_order = self._check_order(constructed_scored)
+            remaining_target = max(1, target_available - len(available))
+            brandable_checked, brandable_available, constructed_warnings = await self._check_live(
+                constructed_order,
+                max_checks=brandable_check_cap,
+                target_available=remaining_target,
+                requested_batch_size=min(domain_checks, 80),
+            )
+            warnings.extend(constructed_warnings)
+            available.extend(brandable_available)
+
+        checked = primary_checked + brandable_checked
         available = await self._screen_available(available, brand_checks)
         return {
             "candidates": [self._with_links(c) for c in available],
@@ -270,15 +353,20 @@ class SearchV2Service(DeepNameLabService):
                 "domain_checked": len(checked),
                 "available": len(available),
                 "brand_checked": min(len(available), max(0, brand_checks)),
-                "known_skipped": known_skipped,
+                "known_skipped": known_skipped + constructed_known_skipped,
                 "search_mode": mode,
                 "source_counts": source_counts,
+                "real_available_before_brandable": real_available,
+                "brandable_pool": brandable_pool,
+                "brandable_after_selection": brandable_scored_count,
+                "brandable_checked": len(brandable_checked),
+                "brandable_available": len(brandable_available),
             },
             "warnings": list(dict.fromkeys(warnings)),
             "search_note": (
-                "Search v2 builds a larger multi-source pool first (genera, real species epithets, "
-                "bundled language words and optional semantic English), ranks it, then checks live .com "
-                "progressively until the requested result yield is reached or the safe check budget is exhausted."
+                "Search v2 first ranks attested sources (genera, species epithets, language and semantic words). "
+                "If live .com yield is too low, Balanced/Deep pivots to controlled brandable forms built from "
+                "those real roots, scored by the same quality and saved-preference model before any domain check."
             ),
             "availability_note": (
                 "Tylko .com dostępne teraz. Domeny z aktywnym rekordem RDAP "
