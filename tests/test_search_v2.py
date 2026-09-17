@@ -202,4 +202,5 @@ def test_search_v2_keeps_live_available_only_invariant():
 def test_frontend_sends_actual_search_mode():
     text = (ROOT / "app" / "static" / "core-v15b1.js").read_text(encoding="utf-8")
     assert "search_mode:mode" in text
-    assert "Głęboki: buduję dużą pulę z wielu źródeł" in text
+    assert "Głęboki: najpierw realne źródła" in text
+    assert "fallback:" in text
