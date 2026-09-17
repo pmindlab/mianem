@@ -9,41 +9,24 @@ class BrandableHit:
     name: str
     niche: str
     key: str | None = None
-    source: str = "brandable:rooted"
+    source: str = "brandable:near-root"
     meaning: str = ""
 
 
 class ControlledBrandableProvider:
-    """Deterministic brandable expansion from attested source words.
+    """Very conservative fallback from attested taxonomic genera.
 
-    This is deliberately not a random syllable generator. Every candidate preserves a
-    visible 3+ letter stem from one or two real discovery hits, then uses a compact set
-    of neutral endings or a bounded stem fusion. The normal Mianem phonetic/quality
-    scorer still decides whether the resulting form is worth checking.
+    Search should prefer real names. If the real-name phase yields too few available
+    `.com` domains, this provider may create a *near-root* variant — never a random
+    syllable blend. A candidate must come from an actual genus/seed hit and differ from
+    that source by at most one character edit. This keeps provenance recognisable.
     """
 
-    ENDINGS = (
-        "a", "e", "i", "o", "ia", "io", "is", "on", "or", "en", "el", "an",
-        "ar", "er", "al", "um", "ix", "ox", "ra", "la", "na", "va",
-    )
-    STRIP_SUFFIXES = (
-        "aceae", "idae", "inae", "opsis", "ella", "ellus", "ensis", "iana",
-        "icus", "icum", "ica", "ium", "ius", "eus", "eum", "ea", "ae",
-        "us", "um", "is",
-    )
     VOWELS = set("aeiou")
-
-    @classmethod
-    def _stem(cls, raw: str) -> str:
-        word = re.sub(r"[^a-z]", "", raw.lower())
-        if len(word) < 3:
-            return ""
-        stem = word
-        for suffix in cls.STRIP_SUFFIXES:
-            if stem.endswith(suffix) and len(stem) - len(suffix) >= 3:
-                stem = stem[:-len(suffix)]
-                break
-        return stem
+    SOURCE_ALLOW = ("gbif:genus", "seed")
+    ADD_AFTER_VOWEL = ("n", "r", "l", "s")
+    ADD_AFTER_CONSONANT = ("a", "e", "i", "o")
+    FINAL_REPLACEMENTS = ("a", "e", "i", "o")
 
     @classmethod
     def _max_cluster(cls, word: str) -> int:
@@ -75,87 +58,90 @@ class ControlledBrandableProvider:
         return True
 
     @staticmethod
-    def _join(left: str, right: str) -> str:
-        # Avoid an ugly doubled boundary when the two preserved parts touch.
-        if left and right and left[-1] == right[0]:
-            return left + right[1:]
-        return left + right
+    def _within_one_edit(source: str, candidate: str) -> bool:
+        if source == candidate:
+            return False
+        if abs(len(source) - len(candidate)) > 1:
+            return False
+        if len(source) == len(candidate):
+            return sum(a != b for a, b in zip(source, candidate)) == 1
+
+        short, long = (source, candidate) if len(source) < len(candidate) else (candidate, source)
+        i = j = edits = 0
+        while i < len(short) and j < len(long):
+            if short[i] == long[j]:
+                i += 1
+                j += 1
+            else:
+                edits += 1
+                j += 1
+                if edits > 1:
+                    return False
+        return True
+
+    @classmethod
+    def _source_allowed(cls, hit) -> bool:
+        source = str(getattr(hit, "source", "") or "")
+        return source == "seed" or source.startswith("gbif:genus")
 
     def expand(self, hits: list, min_len: int, max_len: int, limit: int = 2400) -> list[BrandableHit]:
         if limit <= 0:
             return []
 
-        roots: list[tuple[str, str, str]] = []
+        roots: list[tuple[str, str]] = []
         seen_roots: set[str] = set()
         for hit in hits:
-            raw = str(getattr(hit, "name", "") or "").strip().lower()
-            root = self._stem(raw)
-            if len(root) < 3 or root in seen_roots:
+            if not self._source_allowed(hit):
                 continue
-            seen_roots.add(root)
+            raw = re.sub(r"[^a-z]", "", str(getattr(hit, "name", "") or "").strip().lower())
+            if len(raw) < 4 or raw in seen_roots:
+                continue
+            seen_roots.add(raw)
             niche = str(getattr(hit, "niche", "") or "source")
-            roots.append((root, raw, niche))
-            if len(roots) >= 360:
+            roots.append((raw, niche))
+            if len(roots) >= 600:
                 break
 
         out: dict[str, BrandableHit] = {}
 
-        def add(word: str, niche: str, key: str, meaning: str, source: str) -> None:
+        def add(candidate: str, raw: str, niche: str, operation: str) -> None:
             if len(out) >= limit:
                 return
-            word = word.lower()
-            if word in seen_roots:
+            candidate = candidate.lower()
+            if candidate in seen_roots or not self._within_one_edit(raw, candidate):
                 return
-            if not self._looks_brandable(word, min_len, max_len):
+            if not self._looks_brandable(candidate, min_len, max_len):
                 return
-            out.setdefault(word, BrandableHit(
-                name=word,
+            out.setdefault(candidate, BrandableHit(
+                name=candidate,
                 niche=niche,
-                key=key,
-                source=source,
-                meaning=meaning,
+                key=raw,
+                source="brandable:near-root",
+                meaning=f"near-root variant of real genus {raw} · {operation} · 1 edit",
             ))
 
-        # Family 1: preserve a real stem and fit a neutral ending to the requested length.
-        for root, raw, niche in roots:
+        for raw, niche in roots:
             for target in range(min_len, max_len + 1):
-                for ending in self.ENDINGS:
-                    keep = target - len(ending)
-                    if keep < 3 or keep > len(root):
-                        continue
-                    stem = root[:keep]
-                    candidate = self._join(stem, ending)
-                    add(
-                        candidate,
-                        niche,
-                        raw,
-                        f"constructed from real root {raw}",
-                        "brandable:rooted",
-                    )
-                    if len(out) >= limit:
-                        return list(out.values())
+                delta = target - len(raw)
 
-        # Family 2: bounded fusion of two attested roots. Each side contributes >=3 chars.
-        # Pair only nearby source roots to keep work deterministic and bounded.
-        for index, (left_root, left_raw, left_niche) in enumerate(roots):
-            for right_root, right_raw, right_niche in roots[index + 1:index + 9]:
-                for target in range(max(min_len, 6), max_len + 1):
-                    for left_size in range(3, target - 2):
-                        right_size = target - left_size
-                        if left_size > len(left_root) or right_size > len(right_root):
-                            continue
-                        left = left_root[:left_size]
-                        right = right_root[-right_size:]
-                        candidate = self._join(left, right)
-                        niche = left_niche if left_niche == right_niche else f"{left_niche} + {right_niche}"
-                        add(
-                            candidate,
-                            niche,
-                            f"{left_raw}+{right_raw}",
-                            f"fusion of real roots {left_raw} + {right_raw}",
-                            "brandable:fusion",
-                        )
-                        if len(out) >= limit:
-                            return list(out.values())
+                # Exactly one appended character. No stem truncation, no arbitrary suffixes.
+                if delta == 1:
+                    additions = self.ADD_AFTER_VOWEL if raw[-1] in self.VOWELS else self.ADD_AFTER_CONSONANT
+                    for ch in additions:
+                        add(raw + ch, raw, niche, "single-character extension")
+
+                # Exactly one final-character substitution. The full preceding genus stays intact.
+                elif delta == 0 and len(raw) >= 5:
+                    for ch in self.FINAL_REPLACEMENTS:
+                        if ch != raw[-1]:
+                            add(raw[:-1] + ch, raw, niche, "final-character substitution")
+
+                # Remove only the final character; never carve a 3-letter stem out of a genus.
+                elif delta == -1 and len(raw) >= 6:
+                    add(raw[:-1], raw, niche, "single-character shortening")
+
+                # More than one edit would make the provenance too abstract, so do nothing.
+                if len(out) >= limit:
+                    return list(out.values())
 
         return list(out.values())
