@@ -9,11 +9,12 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .service import NameLabService
 from .workshop_v16 import analyze_pair, workshop
 
 ROOT = Path(__file__).resolve().parent
-app = FastAPI(title="Mianem", version="1.7.0")
+app = FastAPI(title="Mianem", version=__version__)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 service = NameLabService()
 
@@ -94,7 +95,8 @@ class WorkshopAvailabilityRequest(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+    html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+    return html.replace("v1.7", f"v{__version__}")
 
 
 @app.get("/api/health")
@@ -103,7 +105,7 @@ async def health():
     return {
         "ok": True,
         "app": "Mianem",
-        "version": "1.7.0",
+        "version": __version__,
         "niche_count": len(niches),
         "custom_niche_count": sum(1 for n in niches if n.get("custom")),
         "language_count": len(service.list_languages()),
