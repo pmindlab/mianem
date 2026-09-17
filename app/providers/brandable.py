@@ -114,9 +114,9 @@ class ControlledBrandableProvider:
                 return
             out.setdefault(candidate, BrandableHit(
                 name=candidate,
-                niche=niche,
+                niche=f"{niche} · from {raw.capitalize()}",
                 key=raw,
-                source=f"brandable:near-root:{raw}",
+                source="brandable:near-root",
                 meaning=f"near-root variant of real genus {raw} · {operation} · 1 edit",
             ))
 
