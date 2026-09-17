@@ -28,6 +28,7 @@ class SearchRequest(BaseModel):
     domain_checks: int = 60
     brand_checks: int = 10
     min_score: float = 55.0
+    search_mode: str = "balanced"
 
 
 class ExploreRequest(BaseModel):
@@ -112,6 +113,7 @@ async def health():
         "workshop": True,
         "semantic_workshop": True,
         "construction_families": True,
+        "search_v2": True,
     }
 
 
@@ -175,6 +177,7 @@ async def search(req: SearchRequest):
         return await service.run_search(
             req.niches, req.min_len, req.max_len, req.per_niche,
             req.domain_checks, req.brand_checks, req.min_score, req.languages,
+            req.search_mode,
         )
     except Exception as exc:
         raise HTTPException(500, f"Search failed: {type(exc).__name__}: {exc}")
