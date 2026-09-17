@@ -81,12 +81,16 @@ def app_url(port: int) -> str:
     return f"http://{HOST}:{port}"
 
 
-def existing_mianem_port() -> int | None:
+def existing_mianem_port(expected_version: str | None = None) -> int | None:
     for port in PORT_RANGE:
         try:
             with urllib.request.urlopen(f"{app_url(port)}/api/health", timeout=0.2) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            if payload.get("ok") is True and payload.get("app") == APP_NAME:
+            if (
+                payload.get("ok") is True
+                and payload.get("app") == APP_NAME
+                and (expected_version is None or payload.get("version") == expected_version)
+            ):
                 return port
         except Exception:
             continue
@@ -137,6 +141,7 @@ def smoke_test() -> int:
 def server_smoke_test() -> int:
     configure_runtime()
     port = choose_port()
+    from app import __version__
     from app.main import app
 
     server = make_server(app, port)
@@ -156,7 +161,11 @@ def server_smoke_test() -> int:
             try:
                 with urllib.request.urlopen(f"{app_url(port)}/api/health", timeout=0.4) as response:
                     payload = json.loads(response.read().decode("utf-8"))
-                if payload.get("ok") is True and payload.get("app") == APP_NAME:
+                if (
+                    payload.get("ok") is True
+                    and payload.get("app") == APP_NAME
+                    and payload.get("version") == __version__
+                ):
                     return 0
             except Exception:
                 if not server_thread.is_alive():
@@ -165,7 +174,7 @@ def server_smoke_test() -> int:
         if server_errors:
             exc, tb = server_errors[0]
             raise RuntimeError(f"Frozen server failed: {type(exc).__name__}: {exc}\n{tb}") from exc
-        raise RuntimeError("Portable server smoke test: lokalny serwer nie osiągnął /api/health.")
+        raise RuntimeError("Portable server smoke test: lokalny serwer nie osiągnął /api/health z właściwą wersją.")
     finally:
         server.should_exit = True
         server_thread.join(timeout=5)
@@ -225,14 +234,15 @@ def recover_previous_state(paths: dict[str, Path]) -> tuple[Path | None, bool]:
 
 def run_gui() -> int:
     paths = configure_runtime()
-    existing = existing_mianem_port()
+    from app import __version__
+
+    existing = existing_mianem_port(__version__)
     if existing is not None:
         webbrowser.open(app_url(existing))
         return 0
 
     imported_from, imported = recover_previous_state(paths)
     port = choose_port()
-    from app import __version__
     from app.main import app
     import tkinter as tk
     from tkinter import messagebox, ttk
