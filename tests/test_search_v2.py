@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 import app.service as service_module
 from app.models import Candidate
-from app.providers import GBIFProvider, SemanticHit, TaxonHit
+from app.providers import (
+    BrandableHit,
+    ControlledBrandableProvider,
+    GBIFProvider,
+    SemanticHit,
+    TaxonHit,
+)
 from app.service_v18 import SearchV2Service
 
 
@@ -113,12 +119,84 @@ def test_domain_check_order_keeps_top_names_and_adds_source_diversity():
     assert len({c.name for c in ordered}) == len(candidates)
 
 
+def test_controlled_brandable_provider_is_deterministic_and_respects_exact_length():
+    provider = ControlledBrandableProvider()
+    hits = [
+        TaxonHit(name="Aurora", niche="birds", source="gbif:epithet"),
+        TaxonHit(name="Lucida", niche="birds", source="gbif:epithet"),
+        SemanticHit(name="lumen", niche="English · light", source="semantic:en"),
+    ]
+    first = provider.expand(hits, 6, 6, limit=120)
+    second = provider.expand(hits, 6, 6, limit=120)
+
+    assert first
+    assert [h.name for h in first] == [h.name for h in second]
+    assert all(len(h.name) == 6 for h in first)
+    assert all(h.source.startswith("brandable:") for h in first)
+    assert all("real root" in h.meaning or "real roots" in h.meaning for h in first)
+
+
+def test_deep_search_pivots_to_brandables_after_zero_real_availability(monkeypatch):
+    service = SearchV2Service.__new__(SearchV2Service)
+    service.brandable = ControlledBrandableProvider()
+    service.profile = SimpleNamespace()
+
+    monkeypatch.setattr(service, "_refresh_profile", lambda: None)
+    monkeypatch.setattr(service, "_known_names", lambda: set())
+
+    discovered = [TaxonHit(name="Aurora", niche="birds", source="gbif:epithet")]
+
+    async def fake_discover_v2(*_args, **_kwargs):
+        return discovered, [], {"gbif:epithet": 1}
+
+    async def fake_score(items, **_kwargs):
+        if items and isinstance(items[0], BrandableHit):
+            return [Candidate(
+                name="Aurore", domain="aurore.com", niche="birds",
+                source="brandable:rooted", score=80,
+            )], 0
+        return [Candidate(
+            name="Aurora", domain="aurora.com", niche="birds",
+            source="gbif:epithet", score=90,
+        )], 0
+
+    async def fake_check(ordered, **_kwargs):
+        if ordered and ordered[0].source.startswith("brandable:"):
+            ordered[0].domain_status = "available"
+            return list(ordered), list(ordered), []
+        for item in ordered:
+            item.domain_status = "taken"
+        return list(ordered), [], []
+
+    async def fake_screen(items, _brand_checks):
+        return items
+
+    monkeypatch.setattr(service, "discover_v2", fake_discover_v2)
+    monkeypatch.setattr(service, "_score_discovered", fake_score)
+    monkeypatch.setattr(service, "_check_live", fake_check)
+    monkeypatch.setattr(service, "_screen_available", fake_screen)
+    monkeypatch.setattr(service, "_with_links", lambda c: c.to_dict())
+
+    result = asyncio.run(service.run_search(
+        ["birds"], min_len=6, max_len=6, domain_checks=80,
+        brand_checks=10, min_score=50, language_keys=["en"], search_mode="deep",
+    ))
+
+    assert result["stats"]["real_available_before_brandable"] == 0
+    assert result["stats"]["brandable_pool"] > 0
+    assert result["stats"]["brandable_checked"] == 1
+    assert result["stats"]["brandable_available"] == 1
+    assert result["candidates"][0]["domain"] == "aurore.com"
+
+
 def test_search_v2_keeps_live_available_only_invariant():
     text = (ROOT / "app" / "service_v18.py").read_text(encoding="utf-8")
     assert 'c.domain_status == "available"' in text
-    assert "cap = 640" in text
+    assert "primary_cap = 640" in text
+    assert "brandable_check_cap = 560" in text
     assert "target_available = 40" in text
     assert "score < min_score" in text
+    assert 'mode != "fast"' in text
 
 
 def test_frontend_sends_actual_search_mode():
