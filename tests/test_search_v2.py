@@ -119,12 +119,12 @@ def test_domain_check_order_keeps_top_names_and_adds_source_diversity():
     assert len({c.name for c in ordered}) == len(candidates)
 
 
-def test_controlled_brandable_provider_is_deterministic_and_respects_exact_length():
+def test_controlled_brandable_provider_is_deterministic_one_edit_and_genus_only():
     provider = ControlledBrandableProvider()
     hits = [
-        TaxonHit(name="Aurora", niche="birds", source="gbif:epithet"),
-        TaxonHit(name="Lucida", niche="birds", source="gbif:epithet"),
-        SemanticHit(name="lumen", niche="English · light", source="semantic:en"),
+        TaxonHit(name="Loxops", niche="hummingbirds", source="gbif:genus"),
+        TaxonHit(name="Aurora", niche="hummingbirds", source="gbif:epithet"),
+        SemanticHit(name="lumen", niche="English · birds", source="semantic:en"),
     ]
     first = provider.expand(hits, 6, 6, limit=120)
     second = provider.expand(hits, 6, 6, limit=120)
@@ -132,11 +132,14 @@ def test_controlled_brandable_provider_is_deterministic_and_respects_exact_lengt
     assert first
     assert [h.name for h in first] == [h.name for h in second]
     assert all(len(h.name) == 6 for h in first)
-    assert all(h.source.startswith("brandable:") for h in first)
-    assert all("real root" in h.meaning or "real roots" in h.meaning for h in first)
+    assert all(h.source == "brandable:near-root" for h in first)
+    assert all(h.key == "loxops" for h in first)
+    assert all("1 edit" in h.meaning for h in first)
+    assert all(provider._within_one_edit("loxops", h.name) for h in first)
+    assert not any(h.key in {"aurora", "lumen"} for h in first)
 
 
-def test_deep_search_pivots_to_brandables_after_zero_real_availability(monkeypatch):
+def test_deep_search_pivots_to_near_root_genus_after_zero_real_availability(monkeypatch):
     service = SearchV2Service.__new__(SearchV2Service)
     service.brandable = ControlledBrandableProvider()
     service.profile = SimpleNamespace()
@@ -144,20 +147,20 @@ def test_deep_search_pivots_to_brandables_after_zero_real_availability(monkeypat
     monkeypatch.setattr(service, "_refresh_profile", lambda: None)
     monkeypatch.setattr(service, "_known_names", lambda: set())
 
-    discovered = [TaxonHit(name="Aurora", niche="birds", source="gbif:epithet")]
+    discovered = [TaxonHit(name="Loxops", niche="hummingbirds", source="gbif:genus")]
 
     async def fake_discover_v2(*_args, **_kwargs):
-        return discovered, [], {"gbif:epithet": 1}
+        return discovered, [], {"gbif:genus": 1}
 
     async def fake_score(items, **_kwargs):
         if items and isinstance(items[0], BrandableHit):
             return [Candidate(
-                name="Aurore", domain="aurore.com", niche="birds",
-                source="brandable:rooted", score=80,
+                name="Loxopa", domain="loxopa.com", niche="hummingbirds",
+                source="brandable:near-root", score=80,
             )], 0
         return [Candidate(
-            name="Aurora", domain="aurora.com", niche="birds",
-            source="gbif:epithet", score=90,
+            name="Loxops", domain="loxops.com", niche="hummingbirds",
+            source="gbif:genus", score=90,
         )], 0
 
     async def fake_check(ordered, **_kwargs):
@@ -186,7 +189,7 @@ def test_deep_search_pivots_to_brandables_after_zero_real_availability(monkeypat
     assert result["stats"]["brandable_pool"] > 0
     assert result["stats"]["brandable_checked"] == 1
     assert result["stats"]["brandable_available"] == 1
-    assert result["candidates"][0]["domain"] == "aurore.com"
+    assert result["candidates"][0]["domain"] == "loxopa.com"
 
 
 def test_search_v2_keeps_live_available_only_invariant():
