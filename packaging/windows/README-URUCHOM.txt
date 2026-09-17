@@ -26,6 +26,16 @@ Historia, zapisane decyzje i własne obszary pozostają lokalnie na komputerze u
 
 Pakiet nie zawiera prywatnej bazy danych autora ani żadnych sekretów/API keys.
 
+Odzyskiwanie zapisów ze starszej wersji
+========================================
+
+Jeżeli nowa baza portable jest pusta, Mianem nie ukrywa tego faktu.
+
+- Gdy obok uruchamianej aplikacji znajduje dokładnie jeden oczywisty starszy plik `data\namelab.db` z zapisanymi kandydatami, importuje go do lokalnego magazynu portable.
+- Gdy nie da się jednoznacznie znaleźć starej bazy, aplikacja zapyta, czy chcesz wskazać poprzedni plik `namelab.db` ręcznie.
+- Niepusta aktualna baza portable nigdy nie jest automatycznie nadpisywana.
+- Istniejący pusty plik docelowy jest zachowywany jako `namelab.before-import*.db` przed importem.
+
 Opcjonalne API keys
 ===================
 
