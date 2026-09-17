@@ -172,7 +172,7 @@ def server_smoke_test() -> int:
 
 
 def recover_previous_state(paths: dict[str, Path]) -> tuple[Path | None, bool]:
-    from packaging.windows.state_migration import auto_import_legacy_database, candidate_count, import_legacy_database
+    from app.portable_state import auto_import_legacy_database, candidate_count, import_legacy_database
 
     target_db = Path(os.environ["NAMELAB_DB"])
     if candidate_count(target_db) > 0:
